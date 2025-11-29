@@ -1,119 +1,109 @@
-# 🤖 Intelligent RAG Chatbot Module
+# 🧠 RAG Chatbot: Proof of Concept & Architecture Guide
 
-> **Note:** This repository is a **showcase** of the RAG Chatbot Module's architecture and capabilities. It demonstrates how modern real-time technologies can be integrated into a modular CMS. The source code here represents the structural design and documentation of the proprietary system.
+This document outlines the architecture and design patterns used to build a robust, production-ready RAG (Retrieval-Augmented Generation) system. It serves as a blueprint for developers looking to understand or replicate this system.
 
----
+## 🎯 Core Objectives
 
-## 📖 Introduction
-
-In the era of AI, users expect instant, accurate answers. Traditional chatbots often fail because they lack context about your specific business or data.
-
-This project bridges that gap. It is a **Retrieval-Augmented Generation (RAG)** chatbot that combines the conversational fluency of large language models (like GPT-4) with the **precision of your own data**.
-
-Built on **Laravel 11**, it uses **WebSockets** for a WhatsApp-like real-time experience, ensuring users never have to hit "refresh" to see a reply.
+1.  **Hybrid Search**: Combine semantic search (embeddings) with keyword search for maximum accuracy.
+2.  **Intent Classification**: Smartly route queries to either the database (for facts) or the LLM (for casual chat).
+3.  **Real-time Feedback**: Provide a "Thinking..." UI to show users the AI's process without blocking the interface.
+4.  **Scalability**: Modular design that can be dropped into any Laravel application.
 
 ---
 
-## 🎯 For Business & Non-Technical Users
-### Why this matters?
+## 🏗️ System Architecture
 
-1.  **Instant Gratification:**
-    *   **The Problem:** Most web chats feel slow. You send a message and wait... and wait.
-    *   **The Solution:** This system uses "WebSockets" (the same tech behind Facebook Messenger) to deliver messages instantly. You see the bot "thinking" and typing in real-time.
+The system is built on **Laravel 11** using a modular approach (`nwidart/laravel-modules`).
 
-2.  **No More "Hallucinations":**
-    *   **The Problem:** AI sometimes makes things up.
-    *   **The Solution:** We use **RAG**. Before the AI answers, it searches *your* database for the facts. It's like giving the AI a textbook before asking it a question.
+### 1. The "Brain": Intent Classifier
+**File**: `Services/IntentClassifier.php`
 
-3.  **Works Everywhere:**
-    *   Whether the user is on a fast office network or a spotty mobile connection, the system is smart enough to adapt, ensuring the message always gets through.
+Instead of sending every message to the LLM (which is slow and expensive), we first classify the user's intent:
+-   **`db_needed`**: The user is asking for facts (e.g., "How many services?", "Who is the CEO?"). -> **Trigger RAG Pipeline**.
+-   **`casual`**: The user is saying "Hello" or "Thanks". -> **Trigger Casual LLM Response**.
+-   **`blocked`**: The user is asking about forbidden topics. -> **Block Request**.
+
+**Key Innovation**: We use a **Hybrid Classification** strategy:
+1.  **Hardcoded Keywords**: Instant detection for critical terms (`classes`, `services`, `price`).
+2.  **LLM Fallback**: If no keywords match, a small, fast LLM classifies the intent.
+
+### 2. The "Search Engine": Hybrid Retrieval
+**File**: `Services/DatabaseService.php` & `Services/EmbeddingService.php`
+
+Standard vector search often fails on exact terms (e.g., "classes" vs "coaching"). We solved this with a 3-step process:
+
+1.  **Query Expansion**:
+    -   User asks: *"classes"*
+    -   System expands to: *"classes coaching courses training workshops"*
+    -   *Why?* This bridges the gap between user slang and database terminology.
+
+2.  **Vector Search (Semantic)**:
+    -   We generate an embedding for the expanded query using `openai/text-embedding-3-small`.
+    -   We search `data_embeddings` table using cosine similarity.
+    -   **Threshold**: `0.10` (tuned for high recall).
+
+3.  **Multi-Table Aggregation**:
+    -   We don't just search one table. We search `services`, `teams`, `blogs`, etc., simultaneously.
+    -   Results are merged and ranked by relevance.
+
+### 3. The "Voice": Response Generation
+**File**: `Services/ResponseService.php`
+
+Once data is retrieved, we don't just dump it. We feed it to the LLM with a strict **System Prompt**:
+-   *"Answer using ONLY this data."*
+-   *"If asked for a count, COUNT the items explicitly."*
+-   *"Do not hallucinate."*
+
+This ensures the AI is **grounded** in truth.
+
+### 4. The "Nervous System": Event-Driven Architecture
+**File**: `Jobs/ProcessOpenRouterMessage.php`
+
+To keep the UI snappy, everything happens in the background:
+1.  **User sends message** -> Saved to DB -> Job dispatched -> Return "200 OK".
+2.  **Job runs**:
+    -   Classifies intent.
+    -   Broadcasts "Thinking..." events via **Reverb (WebSockets)**.
+    -   Retrieves data.
+    -   Generates response.
+3.  **Broadcast**: Final response is pushed to the frontend.
 
 ---
 
-## ⚙️ For Developers & Engineers
-### Technical Deep Dive
+## 🛠️ Database Schema
 
-This module is engineered as a self-contained **Laravel Module** (`nwidart/laravel-modules`), making it a drop-in solution for any Laravel 11 application.
+### `data_embeddings` Table
+The backbone of our search. It stores vector representations of all content.
 
-### 🏗 Architecture
-
-```mermaid
-sequenceDiagram
-    participant User as 👤 User (Frontend)
-    participant Server as 🖥️ Laravel Server
-    participant Queue as ⚙️ Redis Queue
-    participant AI as 🧠 OpenRouter AI
-    participant Reverb as 📡 Reverb (WebSocket)
-
-    User->>Server: Sends Message (AJAX)
-    Server->>Queue: Dispatches Job (Async)
-    Server-->>User: Returns "Message Sent"
-    
-    rect rgb(240, 240, 240)
-        Note right of Queue: Background Process
-        Queue->>Queue: 1. Generate Embedding
-        Queue->>Queue: 2. Search Vector DB (RAG)
-        Queue->>AI: 3. Send Prompt + Context
-        AI-->>Queue: 4. Returns Response
-    end
-
-    Queue->>Reverb: Broadcast Event (ShouldBroadcastNow)
-    Reverb-->>User: Pushes Message to Browser ⚡
+```sql
+create_table 'data_embeddings' (
+    id: bigInteger,
+    table_name: string,      -- e.g., 'services'
+    entity_id: bigInteger,   -- ID in the original table
+    embedding_type: string,  -- 'title', 'description', 'combined'
+    raw_text: text,          -- The actual text content
+    embedding: vector(1536)  -- The vector data
+);
 ```
 
-### 🛠 Technology Stack
+---
 
-| Component | Tech Choice | Why? |
-| :--- | :--- | :--- |
-| **Framework** | **Laravel 11** | Robust, secure, and developer-friendly. |
-| **Real-Time** | **Laravel Reverb** | First-party WebSocket server. Blazing fast & scalable. |
-| **Frontend** | **Vanilla JS + Pusher.js** | Lightweight. No heavy React/Vue build step required. |
-| **AI Model** | **OpenRouter** | Flexible access to GPT-4, Claude 3.5, and Llama 3. |
-| **Queue** | **Database/Redis** | Decouples AI processing from the web request to prevent timeouts. |
+## 🚀 Key Learnings & "Gotchas"
 
-### 🧩 Key Engineering Challenges Solved
-
-#### 1. The "Network Fallback" Strategy
-WebSockets are great, but corporate firewalls often block them.
-*   **Solution:** I implemented a robust **fallback mechanism**. The frontend attempts a WebSocket connection first. If it fails or times out, it seamlessly switches to **Long Polling** without the user noticing.
-
-#### 2. Session Consistency
-In a stateless web environment, maintaining a continuous chat session across page reloads is tricky.
-*   **Solution:** The system tracks the `Session ID` and automatically resubscribes the WebSocket channel if the Laravel session regenerates, ensuring no messages are lost.
-
-#### 3. Modular Isolation
-*   **Solution:** The entire feature (Routes, Controllers, Views, Assets) lives inside `Modules/Rag`. You can delete the folder, and the main app continues to work perfectly. Zero tight coupling.
+1.  **Embeddings aren't magic**: They fail on specific jargon. **Query Expansion** is mandatory for production reliability.
+2.  **Context is tricky**: Don't rely on conversation context for database queries. If a user asks "What are they?" after "How many?", force a new DB search.
+3.  **Feedback is UX**: A static loading spinner feels slow. A "Thinking..." log that shows *what* the AI is doing ("Searching services...", "Found 5 items") makes the wait feel shorter and builds trust.
 
 ---
 
-## 🚀 How to Deploy
+## 📦 How to Replicate
 
-This system is designed for production environments using **Nginx** and **Supervisor**.
-
-1.  **Supervisor** keeps the `queue:work` (AI processing) and `reverb:start` (WebSocket server) processes alive 24/7.
-2.  **Nginx** acts as a reverse proxy, handling SSL termination so users can connect via secure `wss://` (WebSocket Secure) protocol.
-
-## 🔮 Future Roadmap
-
-*   [ ] **Voice Mode:** Adding Speech-to-Text for voice interactions.
-*   [ ] **Multi-Modal RAG:** Allowing the bot to "see" images uploaded by users.
-*   [ ] **Admin Dashboard:** A live view of active chats and sentiment analysis.
+1.  **Setup**: Laravel 11 + Reverb + Queue Worker.
+2.  **Models**: Create models for your data (`Service`, `Team`, etc.).
+3.  **Embed**: Write a script to loop through your data and generate embeddings via OpenRouter/OpenAI.
+4.  **Search**: Implement the Cosine Similarity search in SQL.
+5.  **Prompt**: rigorous prompt engineering is the final line of defense against hallucinations.
 
 ---
 
-
-## 🤝 License & Contribution
-
-© All rights reserved by [Gokul Subedi](https://github.com/mesafal). This project is closed-source.
-
-Got ideas, feedback, or want to collaborate? I’m open to meaningful contributions and discussions.  
-Reach out via [GitHub](https://github.com/meSafal) or email at [subedigokul119@gmail.com](mailto:subedigokul119@gmail.com).
-
----
-
-> Happy Coding 🙂🙂🙂  
-> Contact me if you have any queries.
-
-<sub><p align="center">📘 This repository and its documentation were prepared and maintained by <a href="https://github.com/MeSafal/" target="_blank"><u><strong>Gokul Subedi</strong></u></a>. For the latest updates and related projects, visit <a href="https://github.com/MeSafal" target="_blank">github.com/MeSafal</a>.</p></sub>
-
-*Created with ❤️ by Gokul Subedi*
+*This architecture is designed to be "Model Agnostic". You can swap OpenRouter for OpenAI, Anthropic, or local Llama models without changing the core logic.*
